@@ -148,11 +148,36 @@
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;
-;;; These could be improved. FIXME
+;;; Working with tests.
+;;; A lot of this stuff could be made more precise. FIXME
 ;;;
 
-(defun test-conjoin (&rest tests) (conjunction tests))
-(defun test-disjoin (&rest tests) (disjunction tests))
+(defgeneric tconjoin/2 (t1 t2)
+  (:method ((t1 test) (t2 test)) (conjunction (list t1 t2))))
+(defmethod tconjoin/2 ((t1 conjunction) (t2 conjunction))
+  (conjunction (append (junction-members t1) (junction-members t2))))
+(defmethod tconjoin/2 ((t1 conjunction) (t2 test))
+  (apply #'test-conjoin t2 (junction-members t1)))
+(defmethod tconjoin/2 ((t1 test) (t2 conjunction))
+  (apply #'test-conjoin 1 (junction-members t2)))
+
+(defgeneric tdisjoin/2 (t1 t2)
+  (:method ((t1 test) (t2 test)) (disjunction (list t1 t2))))
+(defmethod tdisjoin/2 ((t1 disjunction) (t2 disjunction))
+  (disjunction (append (junction-members t1) (junction-members t2))))
+(defmethod tdisjoin/2 ((t1 disjunction) (t2 test))
+  (apply #'test-disjoin t2 (junction-members t1)))
+(defmethod tdisjoin/2 ((t1 test) (t2 disjunction))
+  (apply #'test-disjoin t1 (junction-members t2)))
+
+(defun test-conjoin (&rest tests)
+  (cond ((null tests) (conjunction nil))
+        ((null (rest tests)) (first tests))
+        (t (reduce #'tconjoin/2 tests))))
+(defun test-disjoin (&rest tests)
+  (cond ((null tests) (disjunction nil))
+        ((null (rest tests)) (first tests))
+        (t (reduce #'tdisjoin/2 tests))))
 (defun test-negate (test) (negation test))
 
 ;;; Compare tests to see if they're definitely identical.
@@ -484,7 +509,7 @@
                          collect (tclass class (member elems)))))))
 
 (defun make-cons-ctype (car cdr env)
-  (let ((test (cons-test car cdr))
+  (let ((test (make-cons-test car cdr))
         (class (find-class 'cons t env)))
     (if (stable-class-p class env)
         (ctype (list (tclass class test)))
