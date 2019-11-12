@@ -27,6 +27,42 @@
 (defun stable-class-p (class env)
   (subtypep class *stable-classes* env))
 
+;;; This system assumes that simplicity and element type of arrays is encoded
+;;; in their classes, and thus that the only non-class check required to check
+;;; an array type is of the dimensions. This function returns the classes for
+;;; a given specifier. 
+;;; SIMPLE is simple-array or array.
+(defun array-classes (simple et dims env)
+  (declare (ignorable simple et dims env))
+  #+clasp
+  (let* ((no-et (eq et '*))
+         (simplep (eq simple 'simple-array))
+         (uaet (if no-et et (upgraded-array-element-type et env)))
+         (rank (cond ((eq dims '*) '*) ((consp dims) (length dims)) (t dims)))
+         (vectorp (or (eq rank '*) (= rank 1)))
+         (mdp (or (eq rank '*) (/= rank 1)))
+         (svnames (if no-et
+                      (mapcar #'cdr core::+simple-vector-type-map+)
+                      (list (core::simple-vector-type uaet))))
+         (cvnames (if no-et
+                      (mapcar #'cdr core::+complex-vector-type-map+)
+                      (list (core::complex-vector-type uaet))))
+         (smdnames (if no-et
+                       (mapcar #'cdr core::+simple-mdarray-type-map+)
+                       (list (core::simple-mdarray-type uaet))))
+         (mdnames (if no-et
+                      (mapcar #'cdr core::+complex-mdarray-type-map+)
+                      (list (core::complex-mdarray-type uaet)))))
+    (nconc (when vectorp
+             (nconc (mapcar #'find-class svnames)
+                    (unless simplep
+                      (mapcar #'find-class cvnames))))
+           (when mdp
+             (nconc (mapcar #'find-class smdnames)
+                    (unless simplep
+                      (mapcar #'find-class mdnames))))))
+  #-(or clasp) (error "BUG: ARRAY-CLASSES missing implementation"))
+
 ;;; Name of an operator "CLASSCASE" that works as following:
 ;;; (classcase var ((literal-class ...) body...) ... (t default-body...))
 ;;; Checks the DIRECT class of var against the various literal classes and
@@ -148,7 +184,18 @@
    (%high-xp :initarg :high-xp :accessor range-high-exclusive-p)))
 (defun range (low low-xp high high-xp)
   (make-instance 'range
-    :low low :low-xp low-xp :high high :high-xp high-xp))
+                 :low low :low-xp low-xp :high high :high-xp high-xp))
+
+;;; Array stuff.
+(defclass dimensions (test)
+  (;; A list of dimension specifications. The CL ones, like (* 3 4).
+   ;; A rank spec is normalized, e.g. 4 is now (* * * *)
+   (%dimses :initarg :dimses :accessor dimensions-dimensions)))
+(defun dimensions (dimses)
+  (make-instance 'dimensions :dimses dimses))
+(defmethod print-object ((o dimensions) s)
+  (print-unreadable-object (o s :type t)
+    (write (dimensions-dimensions o) :stream s)))
 
 ;;; A runtime class check, e.g. through class precedence lists.
 (defclass runtime (test)
@@ -178,6 +225,10 @@
   (apply #'test-disjoin t2 (junction-members t1)))
 (defmethod tdisjoin/2 ((t1 test) (t2 disjunction))
   (apply #'test-disjoin t1 (junction-members t2)))
+(defmethod tdisjoin/2 ((t1 dimensions) (t2 dimensions))
+  (let ((new (append (dimensions-dimensions t1)
+                     (dimensions-dimensions t2))))
+    (dimensions (delete-duplicates new :test #'equal))))
 
 (defun test-conjoin (&rest tests)
   (cond ((null tests) (conjunction nil))
@@ -247,6 +298,15 @@
       (success)
       (cons-test car cdr)))
 
+;;; Takes one argument straight from a type specifier.
+(defun make-dimensions (dimspec)
+  (dimensions
+   (list
+    (cond ((and (integerp dimspec) (>= dimspec 0))
+           (make-list dimspec :initial-element '*))
+          ((consp dimspec) dimspec) ; FIXME: verify
+          ((eq dimspec '*) (return-from make-dimensions (success)))))))
+
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;
 ;;; Generate code for a test.
@@ -289,6 +349,17 @@
         ,@(cond ((eq (range-high test) '*) nil)
                 ((range-high-exclusive-p test) `((< ,var ,(range-high test))))
                 (t `((<= ,var ,(range-high test)))))))
+
+(defmethod generate-test-condition ((test dimensions) var)
+  ;; FIXME: Could probably be a lot smarter.
+  `(or
+    ,@(loop
+        for dimspec in (dimensions-dimensions test)
+        collect `(and (= (array-rank ,var) ,(length dimspec))
+                      ,@(loop for n in dimspec
+                              for i from 0
+                              unless (eq n '*)
+                                collect `(= (array-dimension ,var ,i) ,n))))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;
@@ -475,6 +546,9 @@
         ((eql) (make-member-ctype (list (first args)) env))
         ((cons) (destructuring-bind (&optional (car '*) (cdr '*)) args
                   (make-cons-ctype car cdr env)))
+        ((array simple-array)
+         (destructuring-bind (&optional (et '*) (dims '*)) args
+           (make-array-ctype head et dims env)))
         ((short-float long-float
           single-float double-float
           float integer rational real)
@@ -602,6 +676,11 @@
         (nconc (float-tclasses test env)
                (integer-range-tclasses test env)
                (list (tclass (find-class 'ratio t env) test))))))))
+
+(defun make-array-ctype (simple et dims env)
+  (let ((classes (array-classes simple et dims env))
+        (test (make-dimensions dims)))
+    (ctype (loop for class in classes collect (tclass class test)))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;
