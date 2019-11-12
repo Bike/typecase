@@ -14,7 +14,7 @@
 ;;; Implementation specific: Given a type specifier, expand any deftypes on top
 ;;; level. Return two values: Head of the type specifier, and any arguments.
 (defun normalize-type (type env)
-  (declare #+clasp (ignore env))
+  (declare (ignorable type env))
   #+clasp (core::normalize-type type)
   #-(or clasp) (error "BUG: NORMALIZE-TYPE missing implementation"))
 
@@ -132,6 +132,15 @@
 (defun cons-test (car cdr)
   (make-instance 'cons-test :car car :cdr cdr))
 
+(defclass range (test)
+  ((%low :initarg :low :accessor range-low :type (or real (eql *)))
+   (%low-xp :initarg :low-xp :accessor range-low-exclusive-p)
+   (%high :initarg :high :accessor range-high :type (or real (eql *)))
+   (%high-xp :initarg :high-xp :accessor range-high-exclusive-p)))
+(defun range (low low-xp high high-xp)
+  (make-instance 'range
+    :low low :low-xp low-xp :high high :high-xp high-xp))
+
 ;;; A runtime class check, e.g. through class precedence lists.
 (defclass runtime (test)
   ((%cname :initarg :cname :accessor runtime-cname)))
@@ -239,6 +248,14 @@
         ,@(unless (eq (cons-test-cdr test) '*)
             `((cl:typep (cdr ,var) ',(cons-test-cdr test))))))
 
+(defmethod generate-test-condition ((test range) var)
+  `(and ,@(cond ((eq (range-low test) '*) nil)
+                ((range-low-exclusive-p test) `((> ,var ,(range-low test))))
+                (t `((>= ,var ,(range-low test)))))
+        ,@(cond ((eq (range-high test) '*) nil)
+                ((range-high-exclusive-p test) `((< ,var ,(range-high test))))
+                (t `((<= ,var ,(range-high test)))))))
+
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;
 ;;; A class with a test attached to it.
@@ -285,7 +302,7 @@
 (defclass ctype ()
   ((%tclasses :initarg :tclasses :accessor ctype-tclasses)
    (%else :initarg :else :accessor ctype-else :type test)))
-(defun ctype (tclasses else)
+(defun ctype (tclasses &optional (else (failure)))
   (make-instance 'ctype :tclasses tclasses :else else))
 
 (defmethod print-object ((o ctype) s)
@@ -424,6 +441,11 @@
         ((eql) (make-member-ctype (list (first args)) env))
         ((cons) (destructuring-bind (&optional (car '*) (cdr '*)) args
                   (make-cons-ctype car cdr env)))
+        ((short-float long-float
+          single-float double-float
+          float integer rational real)
+         (destructuring-bind (&optional (low '*) (high '*)) args
+           (make-range-ctype head low high env)))
         ((satisfies) (ctype nil (satisfies (first args))))
         ((member) (make-member-ctype args env))
         ;; TODO: cons, numbers, etc
@@ -440,8 +462,8 @@
 (defun make-name-ctype (name env)
   (let ((class (find-class name nil env)))
     (if (and class (stable-class-p class env))
-        (ctype (list (tclass class (success))) (failure))
-        (ctype (list (tclass :unstable (runtime name))) (failure)))))
+        (ctype (list (tclass class (success))))
+        (ctype (list (tclass :unstable (runtime name)))))))
 
 ;;; make a canonical-test for a member type.
 ;;; this will still be broken up by classes.
@@ -459,16 +481,93 @@
         finally (return
                   (ctype
                    (loop for (class . elems) in alist
-                         collect (tclass class (member elems)))
-                   (failure)))))
+                         collect (tclass class (member elems)))))))
 
 (defun make-cons-ctype (car cdr env)
   (let ((test (cons-test car cdr))
         (class (find-class 'cons t env)))
     (if (stable-class-p class env)
-        (ctype (list (tclass class test)) (failure))
-        (ctype (list (tclass :unstable (test-conjoin (runtime 'cons) test)))
-               (failure)))))
+        (ctype (list (tclass class test)))
+        (ctype (list (tclass :unstable
+                             (test-conjoin (runtime 'cons) test)))))))
+
+;;; numeric ranges.
+;;: FIXME: We assume all subtypes of REAL are stable, and that fixnum, bignum,
+;;; and any etc-float that are actually distinct are all classes.
+;;; Writing this is really annoying otherwise.
+(defun float-class (name env)
+  ;; Ideally, all these subtypeps should reduce to constants.
+  (macrolet ((floatcase (name &rest possibles)
+               `(cond ,@(loop for possible in possibles
+                              collect `((subtypep ',name ',possible env)
+                                        (find-class ',possible t env)))
+                      (t (find-class ',name t env)))))
+    (ecase name
+      ((short-float) (floatcase short-float single-float))
+      ((long-float) (floatcase long-float single-float double-float))
+      ((double-float) (floatcase double-float single-float))
+      ((single-float) (floatcase single-float)))))
+;;; Technically we could be smarter with this, but also I don't care.
+(defun float-classes (env)
+  (delete-duplicates (loop for name in '(short-float long-float
+                                         single-float double-float)
+                           collect (float-class name env))
+                     :test #'eq))
+(defun float-tclasses (test env)
+  (mapcar (lambda (class) (tclass class test)) (float-classes env)))
+;;; Divvy up into fixnum and bignum.
+(defun integer-range-tclasses (test env)
+  (let ((low (range-low test)) (low-xp (range-low-exclusive-p test))
+        (high (range-high test)) (high-xp (range-high-exclusive-p test)))
+    ;; Convert to inclusive range for simplicity's sake.
+    (when low-xp (incf low))
+    (when high-xp (decf high))
+    ;; Divvy
+    (multiple-value-bind (bignum-low fixnum-low)
+        (cond ((eq low '*) (values low low))
+              ((< low most-negative-fixnum) (values low '*))
+              ((= low most-negative-fixnum) (values nil '*))
+              ((<= low most-positive-fixnum) (values nil low))
+              (t (values nil nil)))
+      (multiple-value-bind (bignum-high fixnum-high)
+          (cond ((eq high '*) (values high high))
+                ((> high most-positive-fixnum) (values high '*))
+                ((= high most-positive-fixnum) (values nil '*))
+                ((>= high most-negative-fixnum) (values nil high))
+                (t (values nil nil)))
+        (let ((bignum-test-low
+                (if (null bignum-low)
+                    (failure)
+                    (range bignum-low nil (1- most-negative-fixnum) nil)))
+              (bignum-test-high
+                (if (null bignum-high)
+                    (failure)
+                    (range (1+ most-positive-fixnum) nil bignum-high nil)))
+              (fixnum-test
+                (if (and fixnum-low fixnum-high)
+                    (range fixnum-low nil fixnum-high nil)
+                    (failure))))
+          (list (tclass (find-class 'fixnum t env) fixnum-test)
+                (tclass (find-class 'bignum t env)
+                        (test-disjoin bignum-test-low bignum-test-high))))))))
+(defun make-range-ctype (cname low high env)
+  (let* ((low-xp (consp low))
+         (high-xp (consp high))
+         (test (range (if low-xp (car low) low) low-xp
+                      (if high-xp (car high) high) high-xp)))
+    (ctype
+     (ecase cname
+       ((short-float single-float double-float long-float)
+        (list (tclass (float-class cname env) test)))
+       ((float) (float-tclasses test env))
+       ((rational)
+        (list* (tclass (find-class 'ratio t env) test)
+               (integer-range-tclasses test env)))
+       ((integer) (integer-range-tclasses test env))
+       ((real)
+        (nconc (float-tclasses test env)
+               (integer-range-tclasses test env)
+               (list (tclass (find-class 'ratio t env) test))))))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;
