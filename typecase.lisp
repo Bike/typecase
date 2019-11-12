@@ -126,6 +126,12 @@
   ((%fname :initarg :fname :accessor satisfies-fname)))
 (defun satisfies (fname) (make-instance 'satisfies :fname fname))
 
+(defclass cons-test (test)
+  ((%car :initarg :car :accessor cons-test-car)
+   (%cdr :initarg :cdr :accessor cons-test-cdr)))
+(defun cons-test (car cdr)
+  (make-instance 'cons-test :car car :cdr cdr))
+
 ;;; A runtime class check, e.g. through class precedence lists.
 (defclass runtime (test)
   ((%cname :initarg :cname :accessor runtime-cname)))
@@ -145,7 +151,7 @@
 (defgeneric test= (test1 test2)
   (:method ((t1 test) (t2 test))
     (values nil nil)))
-(defmethod test= ((t1 junction) (t2 junction))
+(defun junction= (t1 t2)
   (let ((t1m (junction-members t1)) (t2m (junction-members t2)))
     (if (and (= (length t1m) (length t2m)))
         (let ((t2m (copy-list t2m)))
@@ -155,10 +161,12 @@
                 if t2mem
                   do (setf t2m (delete t2mem t2m :test #'eq))
                 else ;; no exact match - give up
-                do (return-from test= (values nil nil)))
+                do (return-from junction= (values nil nil)))
           ;; Everything had a match.
           (values t t))
         (values nil nil))))
+(defmethod test= ((t1 conjunction) (t2 conjunction)) (junction= t1 t2))
+(defmethod test= ((t1 disjunction) (t2 disjunction)) (junction= t1 t2))
 (defmethod test= ((t1 negation) (t2 negation))
   (test= (negation-underlying t1) (negation-underlying t2)))
 (defmethod test= ((t1 member) (t2 member))
@@ -189,6 +197,13 @@
   (and (cl:typep test 'disjunction)
        (null (junction-members test))))
 
+;;; deal with *s. bottom and stuff is left to later codegen, though.
+;;; TODO: But we could generate canonical types now and make things smarter.
+(defun make-cons-test (car cdr)
+  (if (and (eq car '*) (eq cdr '*))
+      (success)
+      (cons-test car cdr)))
+
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;
 ;;; Generate code for a test.
@@ -215,6 +230,14 @@
 
 (defmethod generate-test-condition ((test satisfies) var)
   `(,(satisfies-fname test) ,var))
+
+(defmethod generate-test-condition ((test cons-test) var)
+  ;; FIXME: Should merge multiple cons tests together thereby avoid getting
+  ;; cars and cdrs multiple times.
+  `(and ,@(unless (eq (cons-test-car test) '*)
+            `((cl:typep (car ,var) ',(cons-test-car test))))
+        ,@(unless (eq (cons-test-cdr test) '*)
+            `((cl:typep (cdr ,var) ',(cons-test-cdr test))))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;
@@ -399,6 +422,8 @@
         ((or)  (ctype-disjoin (mapcar #'recur args)))
         ((not) (ctype-negate (recur (first args))))
         ((eql) (make-member-ctype (list (first args)) env))
+        ((cons) (destructuring-bind (&optional (car '*) (cdr '*)) args
+                  (make-cons-ctype car cdr env)))
         ((satisfies) (ctype nil (satisfies (first args))))
         ((member) (make-member-ctype args env))
         ;; TODO: cons, numbers, etc
@@ -436,6 +461,14 @@
                    (loop for (class . elems) in alist
                          collect (tclass class (member elems)))
                    (failure)))))
+
+(defun make-cons-ctype (car cdr env)
+  (let ((test (cons-test car cdr))
+        (class (find-class 'cons t env)))
+    (if (stable-class-p class env)
+        (ctype (list (tclass class test)) (failure))
+        (ctype (list (tclass :unstable (test-conjoin (runtime 'cons) test)))
+               (failure)))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;
