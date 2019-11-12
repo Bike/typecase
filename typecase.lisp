@@ -38,7 +38,8 @@
   (let* ((no-et (eq et '*))
          (simplep (eq simple 'simple-array))
          (uaet (if no-et et (upgraded-array-element-type et env)))
-         (rank (cond ((eq dims '*) '*) ((consp dims) (length dims)) (t dims)))
+         (rank (cond ((eq dims '*) '*) ((consp dims) (length dims))
+                     ((null dims) 0) (t dims)))
          (vectorp (or (eq rank '*) (= rank 1)))
          (mdp (or (eq rank '*) (/= rank 1)))
          (svnames (if no-et
@@ -188,14 +189,20 @@
 
 ;;; Array stuff.
 (defclass dimensions (test)
-  (;; A list of dimension specifications. The CL ones, like (* 3 4).
+  (;; A vector of dimension specifications. The CL ones, like (* 3 4).
    ;; A rank spec is normalized, e.g. 4 is now (* * * *)
-   (%dimses :initarg :dimses :accessor dimensions-dimensions)))
+   ;; They are organized by rank. For example if we had an array that
+   ;; could be one dimensional, or (* 3) or (* 7), we'd have
+   ;; #(() ((*)) ((* 3) (* 7)))
+   (%dimses :initarg :dimses :accessor dimensions-dimensions
+            :type vector)))
 (defun dimensions (dimses)
   (make-instance 'dimensions :dimses dimses))
 (defmethod print-object ((o dimensions) s)
   (print-unreadable-object (o s :type t)
-    (write (dimensions-dimensions o) :stream s)))
+    (write (loop for rank across (dimensions-dimensions o)
+                 appending rank)
+           :stream s)))
 
 ;;; A runtime class check, e.g. through class precedence lists.
 (defclass runtime (test)
@@ -215,7 +222,46 @@
 (defmethod tconjoin/2 ((t1 conjunction) (t2 test))
   (apply #'test-conjoin t2 (junction-members t1)))
 (defmethod tconjoin/2 ((t1 test) (t2 conjunction))
-  (apply #'test-conjoin 1 (junction-members t2)))
+  (apply #'test-conjoin t1 (junction-members t2)))
+
+;;; Given two dimension specs of the same rank, conjoin them.
+;;; Return NIL if the intersection is empty.
+;;; (This will always return NIL with rank 0, obviously.)
+(defun conjoin-dims (d1 d2)
+  (loop for dim1 in d1
+        for dim2 in d2
+        collect (cond ((eq dim1 '*) dim2)
+                      ((eq dim2 '*) dim1)
+                      (t (if (= dim1 dim2)
+                             dim1
+                             (return-from conjoin-dims nil))))))
+;;; Given two lists of dimension specs, all of the same rank, conjoin.
+;;; Result is a list of dimension specs, which can be empty.
+;;; We do the dumb quadratric algorithm - conjoin them all pairwise -
+;;; because I don't expect this to be a bottleneck.
+;;; Doesn't work right with rank 0.
+(defun conjoin-dimses (dimses1 dimses2)
+  (loop for dims1 in dimses1
+        nconc (loop for dims2 in dimses2
+                    when (conjoin-dims dims1 dims2) collect it)))
+
+(defmethod tconjoin/2 ((t1 dimensions) (t2 dimensions))
+  (let* ((dd1 (dimensions-dimensions t1))
+         (dd2 (dimensions-dimensions t2))
+         (new (map 'vector #'conjoin-dimses dd1 dd2)))
+    ;; Special case rank 0. Also note the vector is not length 0,
+    ;; because then one argument was the empty type, which we make
+    ;; sure not to make as a DIMENSIONS object.
+    (when (or (aref dd1 0) (aref dd2 0))
+      (setf (aref new 0) (list nil)))
+    ;; Figure out if we have any nulls to cut out.
+    (let ((last-rank (position-if-not #'null new :from-end t)))
+      (if (null last-rank)
+          ;; We have nothing.
+          (failure)
+          ;; Shrink the vector and make a dimensions.
+          (dimensions
+           (adjust-array new (1+ last-rank)))))))
 
 (defgeneric tdisjoin/2 (t1 t2)
   (:method ((t1 test) (t2 test)) (disjunction (list t1 t2))))
@@ -225,10 +271,36 @@
   (apply #'test-disjoin t2 (junction-members t1)))
 (defmethod tdisjoin/2 ((t1 test) (t2 disjunction))
   (apply #'test-disjoin t1 (junction-members t2)))
+
+;;; Does dims1 describe a subset of dims2? Assumed same rank.
+(defun dims<= (dims1 dims2)
+  (loop for d1 in dims1
+        for d2 in dims2
+        always (or (eq d2 '*)
+                   (and (not (eq d1 '*))
+                        (= d1 d2)))))
+;;; Given two lists of dimension specs, all of the same rank, disjoin.
+(defun disjoin-dimses (dimses1 dimses2)
+  (let* ((dimses1
+           (loop for dims1 in dimses1
+                 ;; position instead of find because with rank 0,
+                 ;; elements will be nil.
+                 unless (position dims1 dimses2 :test #'dims<=)
+                   collect dims1))
+         (dimses2
+           (loop for dims2 in dimses2
+                 unless (position dims2 dimses1 :test #'dims<=)
+                   collect dims2)))
+    (nconc dimses1 dimses2)))
 (defmethod tdisjoin/2 ((t1 dimensions) (t2 dimensions))
-  (let ((new (append (dimensions-dimensions t1)
-                     (dimensions-dimensions t2))))
-    (dimensions (delete-duplicates new :test #'equal))))
+  ;; Copy the longer vector, append in everything from the shorter.
+  (let ((dd1 (dimensions-dimensions t1))
+        (dd2 (dimensions-dimensions t2)))
+    (when (> (length dd2) (length dd1))
+      (rotatef dd1 dd2))
+    (let ((new (copy-seq dd1)))
+      (map-into new #'disjoin-dimses new dd2)
+      (dimensions new))))
 
 (defun test-conjoin (&rest tests)
   (cond ((null tests) (conjunction nil))
@@ -238,7 +310,15 @@
   (cond ((null tests) (disjunction nil))
         ((null (rest tests)) (first tests))
         (t (reduce #'tdisjoin/2 tests))))
-(defun test-negate (test) (negation test))
+
+(defgeneric test-negate (test)
+  (:method ((test test)) (negation test)))
+
+;;; De Morgan
+(defmethod test-negate ((test conjunction))
+  (apply #'test-disjoin (mapcar #'test-negate (junction-members test))))
+(defmethod test-negate ((test disjunction))
+  (apply #'test-conjoin (mapcar #'test-negate (junction-members test))))
 
 ;;; Compare tests to see if they're definitely identical.
 ;;; Return two values like subtypep.
@@ -300,12 +380,22 @@
 
 ;;; Takes one argument straight from a type specifier.
 (defun make-dimensions (dimspec)
-  (dimensions
-   (list
-    (cond ((and (integerp dimspec) (>= dimspec 0))
-           (make-list dimspec :initial-element '*))
-          ((consp dimspec) dimspec) ; FIXME: verify
-          ((eq dimspec '*) (return-from make-dimensions (success)))))))
+  (cond ((and (integerp dimspec) (>= dimspec 0))
+         (let* ((dims (make-list dimspec :initial-element '*))
+                (dimses (list dims))
+                (vec (make-array (1+ dimspec) :initial-element nil)))
+           (setf (aref vec dimspec) dimses)
+           (dimensions vec)))
+        ((consp dimspec)
+         (let* ((rank (length dimspec))
+                (dimses (list dimspec))
+                (vec (make-array (1+ rank) :initial-element nil)))
+           (setf (aref vec rank) dimses)
+           (dimensions vec)))
+        ((null dimspec)
+         (dimensions (make-array 1 :initial-element (list nil))))
+        ((eq dimspec '*) (return-from make-dimensions (success)))
+        (t (error "Bad dimspec ~s" dimspec))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;
@@ -352,14 +442,28 @@
 
 (defmethod generate-test-condition ((test dimensions) var)
   ;; FIXME: Could probably be a lot smarter.
-  `(or
-    ,@(loop
-        for dimspec in (dimensions-dimensions test)
-        collect `(and (= (array-rank ,var) ,(length dimspec))
-                      ,@(loop for n in dimspec
-                              for i from 0
-                              unless (eq n '*)
-                                collect `(= (array-dimension ,var ,i) ,n))))))
+  (labels ((one-dimspec (spec dimsyms)
+             `(and
+               ,@(loop for sym in dimsyms
+                       for dim in spec
+                       unless (eq dim '*)
+                         collect `(= ,sym ,dim))))
+           (one-rank (dims rank)
+             (let ((dimsyms (loop repeat rank
+                                  collect (gensym "ARRAY-DIMENSION"))))
+               `(let (,@(loop for j below rank
+                              for sym in dimsyms
+                              collect `((,sym
+                                         (array-dimension ,var ,j)))))
+                  (declare (ignorable ,@dimsyms))
+                  (or ,@(loop for spec in dims
+                               collect (one-dimspec spec dimsyms)))))))
+  `(case (array-rank ,var)
+     ,@(loop
+         for dims across (dimensions-dimensions test)
+         for i from 0
+         unless (null dims)
+           collect `((,i) ,(one-rank dims i))))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;
