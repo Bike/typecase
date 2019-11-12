@@ -1,7 +1,7 @@
 (defpackage #:typecase
   (:use #:cl)
-  (:export #:typecase)
-  (:shadow #:typecase)
+  (:export #:typecase #:etypecase)
+  (:shadow #:typecase #:etypecase)
   (:shadow #:member #:satisfies))
 
 (in-package #:typecase)
@@ -56,33 +56,42 @@
       (fix-otherwise-clause clauses)
     (unless (null extra)
       (warn "Clauses in TYPECASE follow an otherwise clause: ~s" extra))
-    (generate-typecase keyform clauses
-                       (or otherwise '(nil)) ; default default: return NIL
-                       env)))
+    (let ((keyg (gensym "TYPECASE-KEY")))
+      `(let ((,keyg ,keyform))
+         ,(generate-typecase keyg clauses
+                             (or otherwise '(nil)) ; default default: return NIL
+                             env)))))
 
-(defun generate-typecase (keyform clauses otherwise env)
+(defmacro etypecase (keyform &rest clauses &environment env)
+  (let ((keyg (gensym "ETYPECASE-KEY")))
+    `(let ((,keyg ,keyform))
+       ,(generate-typecase
+         keyg clauses
+         `((error 'type-error :datum ,keyg
+                              :expected-type '(or ,@(mapcar #'car clauses))))
+         env))))
+
+(defun generate-typecase (keyg clauses otherwise env)
   (let* ((ctypes (loop for (typespec) in clauses
                        collect (canonicalize-type typespec env)))
          (tags (loop repeat (length clauses) collect (gensym "TYPECASE-RESULT")))
          (default-tag (gensym "TYPECASE-DEFAULT"))
          (block-name (gensym "TYPECASE-BLOCK"))
-         (keyg (gensym "TYPECASE-KEY"))
          (bodies (loop for (typespec . body) in clauses
                        collect `(return-from ,block-name
                                   (locally (declare (type ,typespec ,keyg))
                                     ,@body)))))
     (multiple-value-bind (tester more-tags more-bodies)
         (generate-typecase-discriminator keyg ctypes tags default-tag)
-      `(let ((,keyg ,keyform))
-         (block ,block-name
-           (tagbody
-              ,tester
-              ,@(loop for tag in more-tags for body in more-bodies
-                      collect tag nconc body)
-              ,@(loop for tag in tags for body in bodies
-                      collect tag collect body)
-              ,default-tag
-              (return-from ,block-name (progn ,@otherwise))))))))
+      `(block ,block-name
+         (tagbody
+            ,tester
+            ,@(loop for tag in more-tags for body in more-bodies
+                    collect tag nconc body)
+            ,@(loop for tag in tags for body in bodies
+                    collect tag collect body)
+            ,default-tag
+            (return-from ,block-name (progn ,@otherwise)))))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;
@@ -472,7 +481,7 @@
          (destructuring-bind (&optional (low '*) (high '*)) args
            (make-range-ctype head low high env)))
         ((satisfies) (ctype nil (satisfies (first args))))
-        ((member) (make-member-ctype args env))
+        ((cl:member) (make-member-ctype args env))
         ;; TODO: cons, numbers, etc
         (t
          (unless (null args)
