@@ -27,12 +27,11 @@
 (defun stable-class-p (class env)
   (subtypep class *stable-classes* env))
 
-;;; This system assumes that simplicity and element type of arrays is encoded
-;;; in their classes, and thus that the only non-class check required to check
-;;; an array type is of the dimensions. This function returns the classes for
-;;; a given specifier. 
-;;; SIMPLE is simple-array or array.
-(defun array-classes (simple et dims env)
+;;; Arrays are kind of hard to do portably this deep.
+;;; This function is supposed to return a list of tclasses that represent the
+;;; given specifier. The system currently assumes all you need is class checks
+;;; and rank/dimension checks.
+(defun array-tclasses (simple et dims env)
   (declare (ignorable simple et dims env))
   #+clasp
   (let* ((no-et (eq et '*))
@@ -45,24 +44,38 @@
          (svnames (if no-et
                       (mapcar #'cdr core::+simple-vector-type-map+)
                       (list (core::simple-vector-type uaet))))
+         (svclasses (mapcar #'find-class svnames))
          (cvnames (if no-et
                       (mapcar #'cdr core::+complex-vector-type-map+)
                       (list (core::complex-vector-type uaet))))
+         (cvclasses (mapcar #'find-class cvnames))
          (smdnames (if no-et
                        (mapcar #'cdr core::+simple-mdarray-type-map+)
                        (list (core::simple-mdarray-type uaet))))
+         (smdclasses (mapcar #'find-class smdnames))
          (mdnames (if no-et
                       (mapcar #'cdr core::+complex-mdarray-type-map+)
-                      (list (core::complex-mdarray-type uaet)))))
-    (nconc (when vectorp
-             (nconc (mapcar #'find-class svnames)
-                    (unless simplep
-                      (mapcar #'find-class cvnames))))
-           (when mdp
-             (nconc (mapcar #'find-class smdnames)
-                    (unless simplep
-                      (mapcar #'find-class mdnames))))))
-  #-(or clasp) (error "BUG: ARRAY-CLASSES missing implementation"))
+                      (list (core::complex-mdarray-type uaet))))
+         (mdclasses (mapcar #'find-class mdnames))
+         (test (make-dimensions dims))
+         (vector-test (cond ((eq dims '*) (success))
+                            ((consp dims)
+                             (when (null (cdr dims))
+                               (if (eq (car dims) '*)
+                                   (success)
+                                   test)))
+                            (t nil))))
+    (flet ((vector-tclass (class) (tclass class vector-test))
+           (mdarray-tclass (class) (tclass class test)))
+      (nconc (when vectorp
+               (nconc (mapcar #'vector-tclass svclasses)
+                      (unless simplep
+                        (mapcar #'vector-tclass cvclasses))))
+             (when mdp
+               (nconc (mapcar #'mdarray-tclass smdclasses)
+                      (unless simplep
+                        (mapcar #'mdarray-tclass mdclasses)))))))
+  #-(or clasp) (error "BUG: ARRAY-TCLASSES missing implementation"))
 
 ;;; Name of an operator "CLASSCASE" that works as following:
 ;;; (classcase var ((literal-class ...) body...) ... (t default-body...))
@@ -783,9 +796,7 @@
                (list (tclass (find-class 'ratio t env) test))))))))
 
 (defun make-array-ctype (simple et dims env)
-  (let ((classes (array-classes simple et dims env))
-        (test (make-dimensions dims)))
-    (ctype (loop for class in classes collect (tclass class test)))))
+  (ctype (array-tclasses simple et dims env) (failure)))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;
