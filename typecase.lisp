@@ -382,6 +382,7 @@
    ;; A further test.
    (%test :initarg :test :accessor tclass-test :type test)))
 (defun tclass (class test)
+  (check-type class pseudoclass)
   (make-instance 'tclass :class class :test test))
 
 (defmethod print-object ((o tclass) s)
@@ -581,7 +582,7 @@
         for elt in members
         for pre-class = (class-of elt)
         for class = (if (stable-class-p pre-class env)
-                        class
+                        pre-class
                         :unstable)
         for entry = (assoc class alist :test #'eq)
         when (null entry) do (push (list class elt) alist)
