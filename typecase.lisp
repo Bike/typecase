@@ -283,6 +283,12 @@
           (dimensions
            (adjust-array new (1+ last-rank)))))))
 
+(defmethod tconjoin/2 ((t1 cons-test) (t2 cons-test))
+  ;; TODO?: If we canonicalized the car and cdr types as well, we
+  ;; could reduce (and (cons integer) (cons cons)) to NIL and such.
+  (cons-test `(and ,(cons-test-car t1) ,(cons-test-car t2))
+             `(and ,(cons-test-cdr t1) ,(cons-test-cdr t2))))
+
 (defgeneric tdisjoin/2 (t1 t2)
   (:method ((t1 test) (t2 test)) (disjunction (list t1 t2))))
 (defmethod tdisjoin/2 ((t1 disjunction) (t2 disjunction))
@@ -367,6 +373,11 @@
   (apply #'test-conjoin
          (loop for memb in (junction-members t2)
                collect (tsubtract t1 memb))))
+
+(defmethod tsubtract ((t1 cons-test) (t2 cons-test))
+  ;; TODO?: See tconjoin/2 method
+  (cons-test `(and ,(cons-test-car t1) (not ,(cons-test-car t2)))
+             `(and ,(cons-test-cdr t1) (not ,(cons-test-cdr t2)))))
 
 ;;; Compare tests to see if they're definitely identical.
 ;;; Return two values like subtypep.
