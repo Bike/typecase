@@ -478,6 +478,9 @@
          unless (null dims)
            collect `((,i) ,(one-rank dims i))))))
 
+(defmethod generate-test-condition ((test runtime) var)
+  `(cl:typep ,var (find-class ',(runtime-cname test))))
+
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;
 ;;; A class with a test attached to it.
@@ -866,27 +869,51 @@
                ;; If there's an :UNSTABLE clause pull it out to the default,
                ;; along with the else.
                (when unstablep
-                 (push (cons (or (cdr (assoc :unstable disc :test #'eq))
-                                 (error "BUG: Wtf2"))
+                 (push (cons (tclass-test
+                              (or (find :unstable disc :test #'eq :key #'tclass-class)
+                                  (error "BUG: Wtf2")))
                              tag)
                        default))
                (push (cons else tag) default))
-      ;; Now just build the form.
-      `(,*classcase* ,var
-        ,@(loop for (class . test-tags) in alist
-                collect `((,class) ,@(generate-tests var (nreverse test-tags) default-tag)))
-        (t ,@(generate-tests var (nreverse default) default-tag))))))
+      ;; Reverse and consolidate the test-tags.
+      ;; A consolidated thing is (tag . test-tags), meaning to try the test-tags,
+      ;; and then if none of them pass, go to tag. This makes mergers easier and stuff.
+      (loop for pair in alist
+            do (setf (cdr pair)
+                     (consolidate-test-tags (nreverse (cdr pair)) default-tag)))
+      (setf default (consolidate-test-tags (nreverse default) default-tag))
+      ;; If multiple classes do no tests and go to the same tag, merge their clauses.
+      ;; TODO: Could be possible to recognize shared suffixes and stuff too.
+      (let ((alist
+              (loop with simple = nil
+                    for (class . (tag . test-tags)) in alist
+                    if (null test-tags)
+                      do (let ((pair (find tag simple :test #'eq :key #'second)))
+                           (if pair
+                               (push class (car pair))
+                               (push (list (list class) tag) simple)))
+                    else collect (list* (list class) tag test-tags) into other
+                    finally (return (nconc simple other)))))
+        ;; Now just build the form.
+        `(,*classcase* ,var
+           ,@(loop for (classes tag . test-tags) in alist
+                   collect `(,classes ,@(generate-tests var test-tags) (go ,tag)))
+           (t ,@(generate-tests var (cdr default)) (go ,(car default))))))))
 
+;;; Given a list (test . tag) in order, return (tag . (test . tag)*).
+;;; Remove any auto-fail tests, and stop early if there's a success.
+(defun consolidate-test-tags (test-tags default-tag)
+  (loop for pair in test-tags
+        for (test . tag) = pair
+        ;; Potentially we could be cleverer about issuing warnings for redundant tests?
+        ;; That is, any after a success.
+        when (success-p test)
+          return (cons tag new-test-tags)
+        unless (failure-p test)
+          collect pair into new-test-tags
+        finally (return (cons default-tag new-test-tags))))
 ;;; Given a list (test . tag) in order, generate code to carry out the tests.
 ;;; The code will be a list of forms.
-(defun generate-tests (var test-tags default-tag)
-  (nconc
+(defun generate-tests (var test-tags)
    (loop for (test . tag) in test-tags
-         ;;; Potentially we could be cleverer about issuing warnings for redundant tests?
-         when (success-p test)
-           collect `(go ,tag) into forms
-           and do (return-from generate-tests forms)
-         unless (failure-p test)
-           collect (generate-test test var `(go ,tag)) into forms
-         finally (return forms))
-   (list `(go ,default-tag))))
+         collect (generate-test test var `(go ,tag))))
