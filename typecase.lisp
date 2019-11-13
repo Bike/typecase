@@ -486,12 +486,12 @@
   `(,(satisfies-fname test) ,var))
 
 (defmethod generate-test-condition ((test cons-test) var)
-  ;; FIXME: Should merge multiple cons tests together thereby avoid getting
-  ;; cars and cdrs multiple times.
+  ;; NOTE: Relies on car and cdr being bound beforehand.
+  ;; See test-cons-involvement below.
   `(and ,@(unless (eq (cons-test-car test) 't)
-            `((cl:typep (car ,var) ',(cons-test-car test))))
+            `((cl:typep car ',(cons-test-car test))))
         ,@(unless (eq (cons-test-cdr test) 't)
-            `((cl:typep (cdr ,var) ',(cons-test-cdr test))))))
+            `((cl:typep cdr ',(cons-test-cdr test))))))
 
 (defmethod generate-test-condition ((test range) var)
   `(and ,@(cond ((eq (range-low test) '*) nil)
@@ -963,5 +963,56 @@
 ;;; Given a list (test . tag) in order, generate code to carry out the tests.
 ;;; The code will be a list of forms.
 (defun generate-tests (var test-tags)
-   (loop for (test . tag) in test-tags
-         collect (generate-test test var `(go ,tag))))
+  ;; Pick off special cases.
+  ;; if there are no test-tags, do nothing
+  (when (null test-tags) (return-from generate-tests nil))
+  ;; if any tests are cons tests, grab the car and cdr for them all to share
+  (let ((bindings nil)
+        (cons-testing (test-list-cons-involvement (mapcar #'car test-tags))))
+    (ecase cons-testing
+      ((nil))
+      ((:car) (push `(car (car ,var)) bindings))
+      ((:cdr) (push `(cdr (cdr ,var)) bindings))
+      ((:car-and-cdr)
+       (push `(car (car ,var)) bindings)
+       (push `(cdr (cdr ,var)) bindings)))
+    ;; Actually generate tests.
+    `((let (,@bindings)
+        ,@(loop for (test . tag) in test-tags
+                collect (generate-test test var `(go ,tag)))))))
+
+;;; Given a list of tests, return a symbol to indicate what they grab
+;;; out of conses. NIL means nothing, and then there's :car, :cdr, or :car-and-cdr.
+(defun test-list-cons-involvement (test-list)
+  (loop with result = nil
+        for test in test-list
+        for involvement = (test-cons-involvement test)
+        do (setf result (disjoin-involvement result involvement))
+        finally (return result)))
+
+(defun disjoin-involvement (i1 i2)
+  (ecase i1
+    ((:car-and-cdr) i1)
+    ((:car) (ecase i2
+              ((nil) i1)
+              ((:car :car-and-cdr) i2)
+              ((:cdr) :car-and-cdr)))
+    ((:cdr) (ecase i2
+              ((nil) i1)
+              ((:cdr :car-and-cdr) i2)
+              ((:car) :car-and-cdr)))
+    ((nil) i2)))
+
+;;; Get the cons involvement for one test.
+(defgeneric test-cons-involvement (test)
+  (:method ((test test)) nil))
+
+(defmethod test-cons-involvement ((test cons-test))
+  (let ((car (if (eq (cons-test-car test) 't) nil :car))
+        (cdr (if (eq (cons-test-cdr test) 't) nil :cdr)))
+    (disjoin-involvement car cdr)))
+
+(defmethod test-cons-involvement ((test negation))
+  (test-cons-involvement (negation-underlying test)))
+(defmethod test-cons-involvement ((test junction))
+  (test-list-cons-involvement (junction-members test)))
