@@ -24,7 +24,7 @@ Here is an example of how to use the system:
                    (string
                     (with-output-to-string (stream destination)
                       (formatter-aux stream control-string format-arguments)))
-                   ((cl:member t)
+                   ((member t)
                     (formatter-aux *standard-output* control-string format-arguments)
                     nil)
                    (stream
