@@ -1,7 +1,8 @@
 (defpackage #:typecase
   (:use #:cl)
-  (:export #:typecase #:etypecase)
-  (:shadow #:typecase #:etypecase)
+  (:export #:typecase #:etypecase #:ctypecase)
+  (:export #:*stable-classes* #:*classcase*)
+  (:shadow #:typecase #:etypecase #:ctypecase)
   (:shadow #:member #:satisfies))
 
 (in-package #:typecase)
@@ -120,6 +121,31 @@
          `((error 'type-error :datum ,keyg
                               :expected-type '(or ,@(mapcar #'car clauses))))
          env))))
+
+(defun ctypecase-error (place value expected-type)
+  (restart-case (error 'type-error :datum value :expected-type expected-type)
+    (store-value (new-value)
+      :report (lambda (stream)
+                (format stream "Supply a new value of ~s." place))
+      :interactive (lambda ()
+                     (format *query-io* "~&Type a form to be evaluated:~%")
+                     (list (eval (read *query-io*))))
+      (return-from ctypecase-error new-value))))
+
+(defmacro ctypecase (keyplace &rest clauses &environment env)
+  (let ((keyg (gensym "CTYPECASE-KEY"))
+        (loop-block (gensym "CTYPECASE-LOOP"))
+        (expected-type `(or ,@(mapcar #'car clauses))))
+    `(loop
+       named loop-block
+       do (let ((,keyg ,keyplace))
+            ,(generate-typecase
+              keyg (loop for (type . body) in clauses
+                         collect `(,type (return-from ,loop-block
+                                           (progn ,@body))))
+              `((setf ,keyplace (ctypecase-error ',keyplace ,keyg
+                                                 ',expected-type)))
+              env)))))
 
 (defun generate-typecase (keyg clauses otherwise env)
   (let* ((ctypes (loop for (typespec) in clauses
