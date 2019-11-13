@@ -422,7 +422,9 @@
 ;;; deal with *s. bottom and stuff is left to later codegen, though.
 ;;; TODO: But we could generate canonical types now and make things smarter.
 (defun make-cons-test (car cdr)
-  (if (and (eq car '*) (eq cdr '*))
+  (when (eq car '*) (setf car 't))
+  (when (eq cdr '*) (setf cdr 't))
+  (if (and (eq car 't) (eq cdr 't))
       (success)
       (cons-test car cdr)))
 
@@ -475,9 +477,9 @@
 (defmethod generate-test-condition ((test cons-test) var)
   ;; FIXME: Should merge multiple cons tests together thereby avoid getting
   ;; cars and cdrs multiple times.
-  `(and ,@(unless (eq (cons-test-car test) '*)
+  `(and ,@(unless (eq (cons-test-car test) 't)
             `((cl:typep (car ,var) ',(cons-test-car test))))
-        ,@(unless (eq (cons-test-cdr test) '*)
+        ,@(unless (eq (cons-test-cdr test) 't)
             `((cl:typep (cdr ,var) ',(cons-test-cdr test))))))
 
 (defmethod generate-test-condition ((test range) var)
