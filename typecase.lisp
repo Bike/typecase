@@ -379,43 +379,6 @@
   (cons-test `(and ,(cons-test-car t1) (not ,(cons-test-car t2)))
              `(and ,(cons-test-cdr t1) (not ,(cons-test-cdr t2)))))
 
-;;; Compare tests to see if they're definitely identical.
-;;; Return two values like subtypep.
-(defgeneric test= (test1 test2)
-  (:method ((t1 test) (t2 test))
-    (values nil nil)))
-(defun junction= (t1 t2)
-  (let ((t1m (junction-members t1)) (t2m (junction-members t2)))
-    (if (and (= (length t1m) (length t2m)))
-        (let ((t2m (copy-list t2m)))
-          ;; Find elementwise matches.
-          (loop for t1mem in t1m
-                for t2mem = (find t1mem t2m :test #'test=)
-                if t2mem
-                  do (setf t2m (delete t2mem t2m :test #'eq))
-                else ;; no exact match - give up
-                do (return-from junction= (values nil nil)))
-          ;; Everything had a match.
-          (values t t))
-        (values nil nil))))
-(defmethod test= ((t1 conjunction) (t2 conjunction)) (junction= t1 t2))
-(defmethod test= ((t1 disjunction) (t2 disjunction)) (junction= t1 t2))
-(defmethod test= ((t1 negation) (t2 negation))
-  (test= (negation-underlying t1) (negation-underlying t2)))
-(defmethod test= ((t1 member) (t2 member))
-  ;; Check if the members are identical.
-  (if (null (set-exclusive-or (member-members t1) (member-members t2)))
-      (values t t)
-      (values nil t)))
-(defmethod test= ((t1 satisfies) (t2 satisfies))
-  (if (eq (satisfies-fname t1) (satisfies-fname t2))
-      (values t t)
-      (values nil nil)))
-(defmethod test= ((t1 runtime) (t2 runtime))
-  (if (eq (runtime-cname t1) (runtime-cname t2))
-      (values t t)
-      (values nil nil)))
-
 ;;; Trivial tests that often come in handy.
 (defun success () (conjunction nil))
 (defun failure () (disjunction nil))
