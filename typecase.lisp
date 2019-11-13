@@ -236,6 +236,13 @@
   (apply #'test-conjoin t2 (junction-members t1)))
 (defmethod tconjoin/2 ((t1 test) (t2 conjunction))
   (apply #'test-conjoin t1 (junction-members t2)))
+(defmethod tconjoin/2 ((t1 test) (t2 negation))
+  (tsubtract t1 (negation-underlying t2)))
+(defmethod tconjoin/2 ((t1 negation) (t2 test))
+  (tsubtract t2 (negation-underlying t1)))
+;;; de morgan
+(defmethod tconjoin/2 ((t1 negation) (t2 negation))
+  (tdisjoin/2 (negation-underlying t1) (negation-underlying t2)))
 
 ;;; Given two dimension specs of the same rank, conjoin them.
 ;;; Return NIL if the intersection is empty.
@@ -284,6 +291,9 @@
   (apply #'test-disjoin t2 (junction-members t1)))
 (defmethod tdisjoin/2 ((t1 test) (t2 disjunction))
   (apply #'test-disjoin t1 (junction-members t2)))
+;; de morgan
+(defmethod tdisjoin/2 ((t1 negation) (t2 negation))
+  (tconjoin/2 (negation-underlying t1) (negation-underlying t2)))
 
 ;;; Does dims1 describe a subset of dims2? Assumed same rank.
 (defun dims<= (dims1 dims2)
@@ -332,6 +342,31 @@
   (apply #'test-disjoin (mapcar #'test-negate (junction-members test))))
 (defmethod test-negate ((test disjunction))
   (apply #'test-conjoin (mapcar #'test-negate (junction-members test))))
+
+;;; (AND t1 (NOT t2))
+(defgeneric tsubtract (t1 t2)
+  (:argument-precedence-order t2 t1)
+  (:method ((t1 test) (t2 test))
+    ;; Since this is called by tconjoin/2, the buck stops here:
+    ;; Give up without further attempts at simplification.
+    (conjunction (list t1 t2))))
+;;; (and x (not (not y))) = (and x y)
+(defmethod tsubtract ((t1 test) (t2 negation))
+  (tconjoin/2 t1 (negation-underlying t2)))
+;;; (and x (not (and y z))) = (and x (or (not y) (not z)))
+;;;  = (or (and x (not y)) (and x (not z)))
+;;; Note that (and x (not (and))) then reduces to (or) as we want.
+(defmethod tsubtract ((t1 test) (t2 conjunction))
+  (apply #'test-disjoin
+         (loop for memb in (junction-members t2)
+               collect (tsubtract t1 memb))))
+;;; (and x (not (or y z))) = (and x (and (not y) (not z)))
+;;; = (and (and x (not y)) (and x (not z)))
+;;; This may not be ideal sometimes? But it'll handle (and x (and)).
+(defmethod tsubtract ((t1 test) (t2 disjunction))
+  (apply #'test-conjoin
+         (loop for memb in (junction-members t2)
+               collect (tsubtract t1 memb))))
 
 ;;; Compare tests to see if they're definitely identical.
 ;;; Return two values like subtypep.
