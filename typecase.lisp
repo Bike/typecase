@@ -268,7 +268,8 @@
   (tsubtract t2 (negation-underlying t1)))
 ;;; de morgan
 (defmethod tconjoin/2 ((t1 negation) (t2 negation))
-  (tdisjoin/2 (negation-underlying t1) (negation-underlying t2)))
+  (test-negate
+   (tdisjoin/2 (negation-underlying t1) (negation-underlying t2))))
 
 ;;; Given two dimension specs of the same rank, conjoin them.
 ;;; Return NIL if the intersection is empty.
@@ -325,7 +326,8 @@
   (apply #'test-disjoin t1 (junction-members t2)))
 ;; de morgan
 (defmethod tdisjoin/2 ((t1 negation) (t2 negation))
-  (tconjoin/2 (negation-underlying t1) (negation-underlying t2)))
+  (test-negate
+   (tconjoin/2 (negation-underlying t1) (negation-underlying t2))))
 
 ;;; Does dims1 describe a subset of dims2? Assumed same rank.
 (defun dims<= (dims1 dims2)
