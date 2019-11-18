@@ -270,6 +270,23 @@
 (defmethod tconjoin/2 ((t1 negation) (t2 negation))
   (test-negate
    (tdisjoin/2 (negation-underlying t1) (negation-underlying t2))))
+;;; Prefer sums of products to products of sums.
+;;; Note that having junctions of more than two things is kind of
+;;; where we need more sophisticated resolution (FIXME).
+;;; It is nice to fix (and (or) (or)) to (or), though.
+(defmethod tconjoin/2 ((t1 disjunction) (t2 disjunction))
+  (apply #'test-disjoin
+         (loop for t1m in (junction-members t1)
+               nconc (loop for t2m in (junction-members t2)
+                           collect (tconjoin/2 t1m t2m)))))
+(defun tconjoin/2-disjunction (disjunction type)
+  (apply #'test-disjoin
+         (loop for tm in (junction-members disjunction)
+               collect (tconjoin/2 tm type))))
+(defmethod tconjoin/2 ((t1 disjunction) (t2 test))
+  (tconjoin/2-disjunction t1 t2))
+(defmethod tconjoin/2 ((t1 test) (t2 disjunction))
+  (tconjoin/2-disjunction t2 t1))
 
 ;;; Given two dimension specs of the same rank, conjoin them.
 ;;; Return NIL if the intersection is empty.
