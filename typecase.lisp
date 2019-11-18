@@ -180,8 +180,7 @@
 ;;;  importantly, runtime class checks (to account for subclassing with classes
 ;;;  unknown at compile time, etc.)
 ;;; Because tests are at worst difficult and at most possible (SATISFIES) to
-;;;  manipulate, there is no canonicalization process.
-;;; Simplification is basically optional. At the moment there is none (FIXME).
+;;;  manipulate, there is little canonicalization process.
 
 ;;; Abstract.
 (defclass test () ())
